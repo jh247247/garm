@@ -290,6 +290,7 @@ func (s *sqlDatabase) CreateEntityPool(ctx context.Context, entity params.ForgeE
 		OSArch:                 param.OSArch,
 		Enabled:                param.Enabled,
 		RunnerBootstrapTimeout: param.RunnerBootstrapTimeout,
+		RunnerIdleTimeout:      param.RunnerIdleTimeout,
 		GitHubRunnerGroup:      param.GitHubRunnerGroup,
 		Priority:               param.Priority,
 		TemplateID:             param.TemplateID,

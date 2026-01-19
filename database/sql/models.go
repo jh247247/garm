@@ -93,6 +93,7 @@ type Pool struct {
 	MaxRunners             uint
 	MinIdleRunners         uint
 	RunnerBootstrapTimeout uint
+	RunnerIdleTimeout      uint
 	Image                  string `gorm:"index:idx_pool_type"`
 	Flavor                 string `gorm:"index:idx_pool_type"`
 	OSType                 commonParams.OSType
@@ -149,6 +150,7 @@ type ScaleSet struct {
 	MaxRunners             uint
 	MinIdleRunners         uint
 	RunnerBootstrapTimeout uint
+	RunnerIdleTimeout      uint
 	Image                  string
 	Flavor                 string
 	OSType                 commonParams.OSType

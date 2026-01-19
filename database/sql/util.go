@@ -280,6 +280,7 @@ func (s *sqlDatabase) sqlToCommonPool(pool Pool) (params.Pool, error) {
 		Tags:                   make([]params.Tag, len(pool.Tags)),
 		Instances:              make([]params.Instance, len(pool.Instances)),
 		RunnerBootstrapTimeout: pool.RunnerBootstrapTimeout,
+		RunnerIdleTimeout:      pool.RunnerIdleTimeout,
 		ExtraSpecs:             json.RawMessage(pool.ExtraSpecs),
 		GitHubRunnerGroup:      pool.GitHubRunnerGroup,
 		Priority:               pool.Priority,
@@ -565,6 +566,10 @@ func (s *sqlDatabase) updatePool(tx *gorm.DB, pool Pool, param params.UpdatePool
 
 	if param.RunnerBootstrapTimeout != nil && *param.RunnerBootstrapTimeout > 0 {
 		pool.RunnerBootstrapTimeout = *param.RunnerBootstrapTimeout
+	}
+
+	if param.RunnerIdleTimeout != nil && *param.RunnerIdleTimeout > 0 {
+		pool.RunnerIdleTimeout = *param.RunnerIdleTimeout
 	}
 
 	if param.GitHubRunnerGroup != nil {

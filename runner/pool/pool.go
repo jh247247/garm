@@ -1056,12 +1056,16 @@ func (r *basePoolManager) scaleDownOnePool(ctx context.Context, pool params.Pool
 	}
 
 	idleWorkers := []params.Instance{}
+	idleTimeout := float64(pool.IdleRunnerTimeout())
 	for _, inst := range existingInstances {
-		// Idle runners that have been spawned and are still idle after 5 minutes, are take into
-		// consideration for scale-down. The 5 minute grace period prevents a situation where a
-		// "queued" workflow triggers the creation of a new idle runner, and this routine reaps
-		// an idle runner before they have a chance to pick up a job.
-		if inst.RunnerStatus == params.RunnerIdle && inst.Status == commonParams.InstanceRunning {
+		// Idle runners that have been spawned and are still idle after the configured
+		// idle timeout (default 5 minutes) are taken into consideration for scale-down.
+		// This grace period prevents a race condition where a runner is marked for deletion
+		// just as GitHub is assigning a new job to it. See issue #455.
+		idleDuration := time.Since(inst.UpdatedAt).Minutes()
+		if inst.RunnerStatus == params.RunnerIdle &&
+			inst.Status == commonParams.InstanceRunning &&
+			idleDuration >= idleTimeout {
 			idleWorkers = append(idleWorkers, inst)
 		}
 	}

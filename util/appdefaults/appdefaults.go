@@ -25,6 +25,12 @@ const (
 	// of time and no new updates have been made to it's state, it will be removed.
 	DefaultRunnerBootstrapTimeout = 20
 
+	// DefaultRunnerIdleTimeout is the default time in minutes an idle runner
+	// must remain idle before it becomes eligible for scale-down. This grace
+	// period prevents race conditions where a runner is deleted just as a new
+	// job is being assigned to it.
+	DefaultRunnerIdleTimeout = 5
+
 	// DefaultGithubURL is the default URL where Github or Github Enterprise can be accessed.
 	DefaultGithubURL = "https://github.com"
 

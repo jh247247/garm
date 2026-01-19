@@ -526,6 +526,7 @@ garm-cli pool add \
 | Max Runners              | 5                                      |
 | Min Idle Runners         | 1                                      |
 | Runner Bootstrap Timeout | 20                                     |
+| Runner Idle Timeout      | 5                                      |
 | Tags                     | ubuntu, incus                          |
 | Belongs to               | gabriel-samfira/garm                   |
 | Level                    | repo                                   |
@@ -540,7 +541,9 @@ Let's unpack the command and explain what happened above. We added a new pool of
 
 We also specified the `--min-idle-runners` option to tell GARM to always keep at least 1 runner idle in the pool. This is useful for repositories that have a lot of workflows that run often, and we want to make sure that we always have a runner ready to pick up a job.
 
-If we review the output of the command, we can see that the pool was created with a maximum number of 5 runners. This is just a default we can tweak when creating the pool, or later using the `garm-cli pool update` command. We can also see that the pool was created with a runner botstrap timeout of 20 minutes. This timeout is important on provider where the instance may take a long time to spin up. For example, on Equinix Metal, some operating systems can take a few minutes to install and reboot. This timeout can be tweaked to a higher value to account for this.
+If we review the output of the command, we can see that the pool was created with a maximum number of 5 runners. This is just a default we can tweak when creating the pool, or later using the `garm-cli pool update` command. We can also see that the pool was created with a runner bootstrap timeout of 20 minutes. This timeout is important on providers where the instance may take a long time to spin up. For example, on Equinix Metal, some operating systems can take a few minutes to install and reboot. This timeout can be tweaked to a higher value to account for this.
+
+The pool also has a runner idle timeout (default 5 minutes), which determines how long an idle runner must remain idle before it becomes eligible for scale-down. This grace period prevents a race condition where GARM marks a runner for deletion at the same moment GitHub is assigning a new job to it. You can configure this using the `--runner-idle-timeout` option when creating or updating a pool.
 
 The pool was created with the `--enabled` flag set to `false`, so the pool won't create any runners yet:
 

@@ -385,6 +385,7 @@ type Pool struct {
 	Endpoint ForgeEndpoint `json:"endpoint,omitempty"`
 
 	RunnerBootstrapTimeout uint      `json:"runner_bootstrap_timeout,omitempty"`
+	RunnerIdleTimeout      uint      `json:"runner_idle_timeout,omitempty"`
 	CreatedAt              time.Time `json:"created_at,omitempty"`
 	UpdatedAt              time.Time `json:"updated_at,omitempty"`
 	// ExtraSpecs is an opaque raw json that gets sent to the provider
@@ -467,6 +468,16 @@ func (p *Pool) RunnerTimeout() uint {
 		return appdefaults.DefaultRunnerBootstrapTimeout
 	}
 	return p.RunnerBootstrapTimeout
+}
+
+// IdleRunnerTimeout returns the idle runner timeout for the pool. If not set,
+// it returns the default value. This is the time in minutes an idle runner
+// must remain idle before it becomes eligible for scale-down.
+func (p *Pool) IdleRunnerTimeout() uint {
+	if p.RunnerIdleTimeout == 0 {
+		return appdefaults.DefaultRunnerIdleTimeout
+	}
+	return p.RunnerIdleTimeout
 }
 
 func (p *Pool) PoolType() ForgeEntityType {

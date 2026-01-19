@@ -168,7 +168,27 @@ func (e *EntityCache) ReplaceEntityPools(entityID string, pools []params.Pool) {
 
 	cache, ok := e.entities[entityID]
 	if !ok {
-		return
+		// Entity doesn't exist in cache yet. Try to create it from one of the pools.
+		// This handles the case where ReplaceEntityPools is called before SetEntity
+		// due to initialization ordering issues.
+		for _, pool := range pools {
+			poolEntity, err := pool.GetEntity()
+			if err != nil || poolEntity.ID != entityID {
+				continue
+			}
+			// Found a valid pool belonging to this entity - create the entity in cache
+			cache = EntityItem{
+				Entity:       poolEntity,
+				Pools:        make(map[string]struct{}),
+				ScaleSets:    make(map[uint]struct{}),
+				RunnerGroups: make(map[string]RunnerGroupEntry),
+			}
+			break
+		}
+		// If we still don't have a cache entry (no valid pools), return early
+		if cache.Pools == nil {
+			return
+		}
 	}
 
 	poolsByID := map[string]struct{}{}
@@ -193,7 +213,27 @@ func (e *EntityCache) ReplaceEntityScaleSets(entityID string, scaleSets []params
 
 	cache, ok := e.entities[entityID]
 	if !ok {
-		return
+		// Entity doesn't exist in cache yet. Try to create it from one of the scale sets.
+		// This handles the case where ReplaceEntityScaleSets is called before SetEntity
+		// due to initialization ordering issues.
+		for _, scaleSet := range scaleSets {
+			scaleSetEntity, err := scaleSet.GetEntity()
+			if err != nil || scaleSetEntity.ID != entityID {
+				continue
+			}
+			// Found a valid scale set belonging to this entity - create the entity in cache
+			cache = EntityItem{
+				Entity:       scaleSetEntity,
+				Pools:        make(map[string]struct{}),
+				ScaleSets:    make(map[uint]struct{}),
+				RunnerGroups: make(map[string]RunnerGroupEntry),
+			}
+			break
+		}
+		// If we still don't have a cache entry (no valid scale sets), return early
+		if cache.ScaleSets == nil {
+			return
+		}
 	}
 
 	scaleSetsByID := map[uint]struct{}{}
@@ -224,11 +264,21 @@ func (e *EntityCache) SetEntityPool(entityID string, pool params.Pool) {
 		return
 	}
 
-	if cache, ok := e.entities[entityID]; ok {
-		e.pools[pool.ID] = pool
-		cache.Pools[pool.ID] = struct{}{}
-		e.entities[entityID] = cache
+	cache, ok := e.entities[entityID]
+	if !ok {
+		// Entity doesn't exist in cache yet. Create it from the pool.
+		// This handles the case where a pool event arrives before the entity
+		// has been added to the cache.
+		cache = EntityItem{
+			Entity:       poolEntity,
+			Pools:        make(map[string]struct{}),
+			ScaleSets:    make(map[uint]struct{}),
+			RunnerGroups: make(map[string]RunnerGroupEntry),
+		}
 	}
+	e.pools[pool.ID] = pool
+	cache.Pools[pool.ID] = struct{}{}
+	e.entities[entityID] = cache
 }
 
 func (e *EntityCache) SetEntityScaleSet(entityID string, scaleSet params.ScaleSet) {
@@ -240,11 +290,21 @@ func (e *EntityCache) SetEntityScaleSet(entityID string, scaleSet params.ScaleSe
 		return
 	}
 
-	if cache, ok := e.entities[entityID]; ok {
-		e.scalesets[scaleSet.ID] = scaleSet
-		cache.ScaleSets[scaleSet.ID] = struct{}{}
-		e.entities[entityID] = cache
+	cache, ok := e.entities[entityID]
+	if !ok {
+		// Entity doesn't exist in cache yet. Create it from the scale set.
+		// This handles the case where a scale set event arrives before the entity
+		// has been added to the cache.
+		cache = EntityItem{
+			Entity:       scaleSetEntity,
+			Pools:        make(map[string]struct{}),
+			ScaleSets:    make(map[uint]struct{}),
+			RunnerGroups: make(map[string]RunnerGroupEntry),
+		}
 	}
+	e.scalesets[scaleSet.ID] = scaleSet
+	cache.ScaleSets[scaleSet.ID] = struct{}{}
+	e.entities[entityID] = cache
 }
 
 func (e *EntityCache) DeleteEntityPool(entityID string, poolID string) {

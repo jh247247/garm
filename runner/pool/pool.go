@@ -528,12 +528,31 @@ func (r *basePoolManager) reapTimedOutRunners(runners []forgeRunner) error {
 			continue
 		}
 
+		// Check if the runner is registered with GitHub
+		runner, ok := runnersByName[instance.Name]
+
+		// For runners that are "offline" (finished job, between jobs, etc.), apply
+		// the same grace period as idle runners before considering them for deletion.
+		// This prevents the race condition where a runner goes briefly offline between
+		// jobs and gets deleted before GitHub can assign a new job.
+		if ok && runner.Status == "offline" {
+			idleTimeout := float64(pool.IdleRunnerTimeout())
+			if time.Since(instance.UpdatedAt).Minutes() < idleTimeout {
+				slog.DebugContext(
+					r.ctx, "offline runner within idle grace period, skipping",
+					"runner_name", instance.Name,
+					"idle_minutes", time.Since(instance.UpdatedAt).Minutes(),
+					"idle_timeout", idleTimeout)
+				continue
+			}
+		}
+
 		// There are 3 cases (currently) where we consider a runner as timed out:
 		//   * The runner never joined github within the pool timeout
 		//   * The runner managed to join github, but the setup process failed later and the runner
 		//     never started on the instance.
 		//   * A JIT config was created, but the runner never joined github.
-		if runner, ok := runnersByName[instance.Name]; !ok || runner.Status == "offline" {
+		if !ok || runner.Status == "offline" {
 			slog.InfoContext(
 				r.ctx, "reaping timed-out/failed runner",
 				"runner_name", instance.Name)

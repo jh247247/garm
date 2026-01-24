@@ -263,18 +263,18 @@ func (r *basePoolManager) HandleWorkflowJob(job params.WorkflowJob) error {
 				"runner_name", util.SanitizeLogEntry(jobParams.RunnerName))
 			return fmt.Errorf("error updating runner: %w", err)
 		}
+
+		// For non-ephemeral runners, we don't immediately mark for deletion on job completion.
+		// This prevents a race condition where GitHub might assign another job to this runner
+		// before we've deleted it. Instead, we let the idle timeout mechanism handle cleanup,
+		// which gives GitHub time to potentially reuse the runner for another job.
+		//
+		// The runner will be cleaned up by either:
+		// - scaleDownOnePool() if it becomes idle and exceeds the idle timeout
+		// - reapTimedOutRunners() if it goes offline and exceeds the idle timeout
 		slog.DebugContext(
-			r.ctx, "marking instance as pending_delete",
+			r.ctx, "job completed, runner will be cleaned up by idle timeout",
 			"runner_name", util.SanitizeLogEntry(jobParams.RunnerName))
-		if _, err := r.setInstanceStatus(jobParams.RunnerName, commonParams.InstancePendingDelete, nil); err != nil {
-			if errors.Is(err, runnerErrors.ErrNotFound) {
-				return nil
-			}
-			slog.With(slog.Any("error", err)).ErrorContext(
-				r.ctx, "failed to update runner status",
-				"runner_name", util.SanitizeLogEntry(jobParams.RunnerName))
-			return fmt.Errorf("error updating runner: %w", err)
-		}
 	case "in_progress":
 		fromCache, ok := cache.GetInstanceCache(jobParams.RunnerName)
 		if !ok {

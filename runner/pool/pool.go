@@ -253,8 +253,10 @@ func (r *basePoolManager) HandleWorkflowJob(job params.WorkflowJob) error {
 			return nil
 		}
 
-		// update instance workload state.
-		if _, err := r.setInstanceRunnerStatus(jobParams.RunnerName, params.RunnerTerminated); err != nil {
+		// Runner is non-ephemeral: mark it idle so it can pick up another job.
+		// The scale-down routine will reap it after the 5-minute grace period
+		// if no new work arrives.
+		if _, err := r.setInstanceRunnerStatus(jobParams.RunnerName, params.RunnerIdle); err != nil {
 			if errors.Is(err, runnerErrors.ErrNotFound) {
 				return nil
 			}
@@ -264,17 +266,8 @@ func (r *basePoolManager) HandleWorkflowJob(job params.WorkflowJob) error {
 			return fmt.Errorf("error updating runner: %w", err)
 		}
 		slog.DebugContext(
-			r.ctx, "marking instance as pending_delete",
+			r.ctx, "job completed, runner set back to idle for reuse",
 			"runner_name", util.SanitizeLogEntry(jobParams.RunnerName))
-		if _, err := r.setInstanceStatus(jobParams.RunnerName, commonParams.InstancePendingDelete, nil); err != nil {
-			if errors.Is(err, runnerErrors.ErrNotFound) {
-				return nil
-			}
-			slog.With(slog.Any("error", err)).ErrorContext(
-				r.ctx, "failed to update runner status",
-				"runner_name", util.SanitizeLogEntry(jobParams.RunnerName))
-			return fmt.Errorf("error updating runner: %w", err)
-		}
 	case "in_progress":
 		fromCache, ok := cache.GetInstanceCache(jobParams.RunnerName)
 		if !ok {
@@ -689,12 +682,31 @@ func (r *basePoolManager) cleanupOrphanedGithubRunners(runners []forgeRunner) er
 			}
 
 			if providerInstance.Status == commonParams.InstanceRunning {
-				// instance is running, but github reports runner as offline. Log the event.
-				// This scenario may require manual intervention.
-				// Perhaps it just came online and github did not yet change it's status?
-				slog.WarnContext(
-					r.ctx, "instance is online but github reports runner as offline",
-					"runner_name", dbInstance.Name)
+				// Instance is running on the provider, but GitHub reports the runner as offline.
+				// This typically happens when the runner agent terminates after completing a job
+				// (e.g. with disable_jit_config = true) but the VM keeps running. We use the
+				// pool's RunnerTimeout as a grace period before deleting — the 5-minute
+				// UpdatedAt check above already guards against races with newly-created instances.
+				offlineMinutes := time.Since(dbInstance.UpdatedAt).Minutes()
+				timeoutMinutes := float64(pool.RunnerTimeout())
+				if offlineMinutes < timeoutMinutes {
+					slog.InfoContext(
+						r.ctx, "offline runner within grace period, skipping",
+						"runner_name", dbInstance.Name,
+						"offline_minutes", offlineMinutes,
+						"timeout_minutes", timeoutMinutes)
+					return nil
+				}
+
+				slog.InfoContext(
+					r.ctx, "instance is running but runner has been offline beyond timeout, deleting",
+					"runner_name", dbInstance.Name,
+					"offline_minutes", offlineMinutes,
+					"timeout_minutes", timeoutMinutes)
+				if err := r.DeleteRunner(dbInstance, false, false); err != nil {
+					return fmt.Errorf("error deleting offline runner %s: %w", dbInstance.Name, err)
+				}
+				deleteMux = true
 				return nil
 			}
 
@@ -1062,6 +1074,13 @@ func (r *basePoolManager) scaleDownOnePool(ctx context.Context, pool params.Pool
 		// "queued" workflow triggers the creation of a new idle runner, and this routine reaps
 		// an idle runner before they have a chance to pick up a job.
 		if inst.RunnerStatus == params.RunnerIdle && inst.Status == commonParams.InstanceRunning {
+			if time.Since(inst.UpdatedAt).Minutes() < 5 {
+				slog.DebugContext(
+					ctx, "idle runner within grace period, skipping for scale-down",
+					"runner_name", inst.Name,
+					"idle_since", inst.UpdatedAt)
+				continue
+			}
 			idleWorkers = append(idleWorkers, inst)
 		}
 	}

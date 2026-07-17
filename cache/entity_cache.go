@@ -14,6 +14,7 @@
 package cache
 
 import (
+	"log/slog"
 	"sync"
 	"time"
 
@@ -166,15 +167,43 @@ func (e *EntityCache) ReplaceEntityPools(entityID string, pools []params.Pool) {
 	e.mux.Lock()
 	defer e.mux.Unlock()
 
+	slog.Debug("ReplaceEntityPools called", "entityID", entityID, "poolCount", len(pools))
+
 	cache, ok := e.entities[entityID]
 	if !ok {
-		return
+		slog.Debug("ReplaceEntityPools: entity not in cache, attempting to create", "entityID", entityID)
+		// Entity doesn't exist in cache yet. Try to create it from one of the pools.
+		// This handles the case where ReplaceEntityPools is called before SetEntity
+		// due to initialization ordering issues.
+		for _, pool := range pools {
+			poolEntity, err := pool.GetEntity()
+			if err != nil || poolEntity.ID != entityID {
+				continue
+			}
+			// Found a valid pool belonging to this entity - create the entity in cache
+			cache = EntityItem{
+				Entity:       poolEntity,
+				Pools:        make(map[string]struct{}),
+				ScaleSets:    make(map[uint]struct{}),
+				RunnerGroups: make(map[string]RunnerGroupEntry),
+			}
+			break
+		}
+		// If we still don't have a cache entry (no valid pools), return early
+		if cache.Pools == nil {
+			slog.Debug("ReplaceEntityPools: no valid pools found for entity", "entityID", entityID)
+			return
+		}
+		slog.Debug("ReplaceEntityPools: created entity from pool", "entityID", entityID)
+	} else {
+		slog.Debug("ReplaceEntityPools: entity already exists in cache", "entityID", entityID)
 	}
 
 	poolsByID := map[string]struct{}{}
 	for _, pool := range pools {
 		poolEntity, err := pool.GetEntity()
 		if err != nil || poolEntity.ID != entityID {
+			slog.Debug("ReplaceEntityPools: skipping pool", "poolID", pool.ID, "poolEntityID", poolEntity.ID, "expectedEntityID", entityID, "err", err)
 			continue
 		}
 		e.pools[pool.ID] = pool
@@ -182,9 +211,11 @@ func (e *EntityCache) ReplaceEntityPools(entityID string, pools []params.Pool) {
 		// in the pools map, but it makes it easier to lookup just pools later
 		// when we want to find the pool for the instance.
 		poolsByID[pool.ID] = struct{}{}
+		slog.Debug("ReplaceEntityPools: linked pool to entity", "poolID", pool.ID, "entityID", entityID)
 	}
 	cache.Pools = poolsByID
 	e.entities[entityID] = cache
+	slog.Debug("ReplaceEntityPools: completed", "entityID", entityID, "linkedPoolCount", len(poolsByID))
 }
 
 func (e *EntityCache) ReplaceEntityScaleSets(entityID string, scaleSets []params.ScaleSet) {
@@ -193,7 +224,27 @@ func (e *EntityCache) ReplaceEntityScaleSets(entityID string, scaleSets []params
 
 	cache, ok := e.entities[entityID]
 	if !ok {
-		return
+		// Entity doesn't exist in cache yet. Try to create it from one of the scale sets.
+		// This handles the case where ReplaceEntityScaleSets is called before SetEntity
+		// due to initialization ordering issues.
+		for _, scaleSet := range scaleSets {
+			scaleSetEntity, err := scaleSet.GetEntity()
+			if err != nil || scaleSetEntity.ID != entityID {
+				continue
+			}
+			// Found a valid scale set belonging to this entity - create the entity in cache
+			cache = EntityItem{
+				Entity:       scaleSetEntity,
+				Pools:        make(map[string]struct{}),
+				ScaleSets:    make(map[uint]struct{}),
+				RunnerGroups: make(map[string]RunnerGroupEntry),
+			}
+			break
+		}
+		// If we still don't have a cache entry (no valid scale sets), return early
+		if cache.ScaleSets == nil {
+			return
+		}
 	}
 
 	scaleSetsByID := map[uint]struct{}{}
@@ -224,11 +275,21 @@ func (e *EntityCache) SetEntityPool(entityID string, pool params.Pool) {
 		return
 	}
 
-	if cache, ok := e.entities[entityID]; ok {
-		e.pools[pool.ID] = pool
-		cache.Pools[pool.ID] = struct{}{}
-		e.entities[entityID] = cache
+	cache, ok := e.entities[entityID]
+	if !ok {
+		// Entity doesn't exist in cache yet. Create it from the pool.
+		// This handles the case where a pool event arrives before the entity
+		// has been added to the cache.
+		cache = EntityItem{
+			Entity:       poolEntity,
+			Pools:        make(map[string]struct{}),
+			ScaleSets:    make(map[uint]struct{}),
+			RunnerGroups: make(map[string]RunnerGroupEntry),
+		}
 	}
+	e.pools[pool.ID] = pool
+	cache.Pools[pool.ID] = struct{}{}
+	e.entities[entityID] = cache
 }
 
 func (e *EntityCache) SetEntityScaleSet(entityID string, scaleSet params.ScaleSet) {
@@ -240,11 +301,21 @@ func (e *EntityCache) SetEntityScaleSet(entityID string, scaleSet params.ScaleSe
 		return
 	}
 
-	if cache, ok := e.entities[entityID]; ok {
-		e.scalesets[scaleSet.ID] = scaleSet
-		cache.ScaleSets[scaleSet.ID] = struct{}{}
-		e.entities[entityID] = cache
+	cache, ok := e.entities[entityID]
+	if !ok {
+		// Entity doesn't exist in cache yet. Create it from the scale set.
+		// This handles the case where a scale set event arrives before the entity
+		// has been added to the cache.
+		cache = EntityItem{
+			Entity:       scaleSetEntity,
+			Pools:        make(map[string]struct{}),
+			ScaleSets:    make(map[uint]struct{}),
+			RunnerGroups: make(map[string]RunnerGroupEntry),
+		}
 	}
+	e.scalesets[scaleSet.ID] = scaleSet
+	cache.ScaleSets[scaleSet.ID] = struct{}{}
+	e.entities[entityID] = cache
 }
 
 func (e *EntityCache) DeleteEntityPool(entityID string, poolID string) {
@@ -299,19 +370,34 @@ func (e *EntityCache) FindPoolsMatchingAllTags(entityID string, tags []string) [
 	e.mux.Lock()
 	defer e.mux.Unlock()
 
+	slog.Debug("FindPoolsMatchingAllTags called", "entityID", entityID, "tags", tags)
+
 	if cache, ok := e.entities[entityID]; ok {
+		slog.Debug("FindPoolsMatchingAllTags: entity found in cache", "entityID", entityID, "poolCount", len(cache.Pools))
 		var pools []params.Pool
 		for poolID := range cache.Pools {
 			if pool, ok := e.pools[poolID]; ok {
+				var tagNames []string
+				for _, t := range pool.Tags {
+					tagNames = append(tagNames, t.Name)
+				}
+				slog.Debug("FindPoolsMatchingAllTags: checking pool", "poolID", poolID, "poolTags", tagNames)
 				if pool.HasRequiredLabels(tags) {
 					pools = append(pools, pool)
+					slog.Debug("FindPoolsMatchingAllTags: pool matches", "poolID", poolID)
+				} else {
+					slog.Debug("FindPoolsMatchingAllTags: pool does not match tags", "poolID", poolID)
 				}
+			} else {
+				slog.Debug("FindPoolsMatchingAllTags: pool not found in pools map", "poolID", poolID)
 			}
 		}
 		// Sort the pools by creation date.
 		sortByCreationDate(pools)
+		slog.Debug("FindPoolsMatchingAllTags: returning pools", "matchingPoolCount", len(pools))
 		return pools
 	}
+	slog.Debug("FindPoolsMatchingAllTags: entity NOT found in cache", "entityID", entityID, "totalEntities", len(e.entities))
 	return nil
 }
 

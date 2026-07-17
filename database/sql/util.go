@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
@@ -319,9 +320,12 @@ func (s *sqlDatabase) sqlToCommonPool(pool Pool) (params.Pool, error) {
 	}
 	ret.Endpoint = endpoint
 
+	var tagNames []string
 	for idx, val := range pool.Tags {
 		ret.Tags[idx] = s.sqlToCommonTags(*val)
+		tagNames = append(tagNames, val.Name)
 	}
+	slog.Debug("sqlToCommonPool: converted pool tags", "poolID", pool.ID.String(), "tagCount", len(pool.Tags), "tagNames", tagNames)
 
 	for idx, inst := range pool.Instances {
 		ret.Instances[idx], err = s.sqlToParamsInstance(inst)

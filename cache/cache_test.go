@@ -1392,13 +1392,16 @@ func (c *CacheTestSuite) TestGetEntityForInstanceWithNonExistentEntity() {
 		PoolID: "pool-1",
 	}
 
-	// Only set pool and instance, not the entity
+	// SetEntityPool now creates the entity if it doesn't exist in the cache.
+	// This handles cases where pool events arrive before entity events due to
+	// initialization ordering issues.
 	SetEntityPool("non-existent-entity", pool)
 	SetInstanceCache(instance)
 
 	retrievedEntity, ok := GetEntityForInstance("test-instance")
-	c.Require().False(ok)
-	c.Require().Equal(params.ForgeEntity{}, retrievedEntity)
+	c.Require().True(ok)
+	c.Require().Equal("non-existent-entity", retrievedEntity.ID)
+	c.Require().Equal(params.ForgeEntityTypeOrganization, retrievedEntity.EntityType)
 }
 
 func (c *CacheTestSuite) TestGetEntityForInstanceWithBothPoolAndScaleSet() {

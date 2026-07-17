@@ -23,6 +23,7 @@ import (
 	"math"
 	"math/big"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -66,6 +67,10 @@ const (
 	// nolint:golangci-lint,godox
 	// TODO: make this configurable(?)
 	maxCreateAttempts = 5
+
+	staleWorkflowJobAge          = 10 * time.Minute
+	staleWorkflowJobCheckBackoff = 5 * time.Minute
+	maxStaleWorkflowJobChecks    = 20
 )
 
 func NewEntityPoolManager(ctx context.Context, entity params.ForgeEntity, instanceTokenGetter auth.InstanceTokenGetter, providers map[string]common.Provider, store dbCommon.Store) (common.PoolManager, error) {
@@ -121,13 +126,14 @@ func NewEntityPoolManager(ctx context.Context, entity params.ForgeEntity, instan
 		controllerInfo:      controllerInfo,
 		instanceTokenGetter: instanceTokenGetter,
 
-		store:     store,
-		providers: providers,
-		quit:      make(chan struct{}),
-		jobs:      make(map[int64]params.Job),
-		wg:        wg,
-		backoff:   backoff,
-		consumer:  consumer,
+		store:          store,
+		providers:      providers,
+		quit:           make(chan struct{}),
+		jobs:           make(map[int64]params.Job),
+		staleJobChecks: make(map[int64]time.Time),
+		wg:             wg,
+		backoff:        backoff,
+		consumer:       consumer,
 	}
 	return repo, nil
 }
@@ -142,8 +148,9 @@ type basePoolManager struct {
 	instanceTokenGetter auth.InstanceTokenGetter
 	consumer            dbCommon.Consumer
 
-	store dbCommon.Store
-	jobs  map[int64]params.Job
+	store          dbCommon.Store
+	jobs           map[int64]params.Job
+	staleJobChecks map[int64]time.Time
 
 	providers map[string]common.Provider
 	tools     []commonParams.RunnerApplicationDownload
@@ -1128,31 +1135,6 @@ func (r *basePoolManager) scaleDownOnePool(ctx context.Context, pool params.Pool
 		})
 	}
 
-	if numScaleDown > 0 {
-		// We just scaled down a runner for this pool. That means that if we have jobs that are
-		// still queued in our DB, and those jobs should match this pool but have not been picked
-		// up by a runner, they are most likely stale and can be removed. For now, we can simply
-		// remove jobs older than 10 minutes.
-		//
-		// nolint:golangci-lint,godox
-		// TODO: should probably allow aditional filters to list functions. Would help to filter by date
-		// instead of returning a bunch of results and filtering manually.
-		queued, err := r.store.ListEntityJobsByStatus(r.ctx, r.entity.EntityType, r.entity.ID, params.JobStatusQueued)
-		if err != nil && !errors.Is(err, runnerErrors.ErrNotFound) {
-			return fmt.Errorf("error listing queued jobs: %w", err)
-		}
-
-		for _, job := range queued {
-			if time.Since(job.CreatedAt).Minutes() > 10 && pool.HasRequiredLabels(job.Labels) {
-				if err := r.store.DeleteJob(ctx, job.WorkflowJobID); err != nil && !errors.Is(err, runnerErrors.ErrNotFound) {
-					slog.With(slog.Any("error", err)).ErrorContext(
-						ctx, "failed to delete job",
-						"job_id", job.WorkflowJobID)
-				}
-			}
-		}
-	}
-
 	if err := r.waitForErrorGroupOrContextCancelled(g); err != nil {
 		return fmt.Errorf("failed to scale down pool %s: %w", pool.ID, err)
 	}
@@ -1748,6 +1730,85 @@ func (r *basePoolManager) DeleteRunner(runner params.Instance, forceRemove, bypa
 	return nil
 }
 
+// reconcileStaleWorkflowJobs verifies old queued/in-progress rows against
+// GitHub before removing them. Webhook delivery can be missed, but age alone is
+// never proof that a job has finished.
+func (r *basePoolManager) reconcileStaleWorkflowJobs() map[int64]struct{} {
+	now := time.Now()
+	jobs := []params.Job{}
+	listedAll := true
+	for _, status := range []params.JobStatus{params.JobStatusQueued, params.JobStatusInProgress} {
+		found, err := r.store.ListEntityJobsByStatus(r.ctx, r.entity.EntityType, r.entity.ID, status)
+		if err != nil {
+			if !errors.Is(err, runnerErrors.ErrNotFound) {
+				listedAll = false
+				slog.With(slog.Any("error", err)).WarnContext(r.ctx, "failed to list jobs for stale reconciliation", "status", status)
+			}
+			continue
+		}
+		jobs = append(jobs, found...)
+	}
+	sort.Slice(jobs, func(i, j int) bool { return jobs[i].CreatedAt.Before(jobs[j].CreatedAt) })
+	if r.staleJobChecks == nil {
+		r.staleJobChecks = make(map[int64]time.Time)
+	}
+	if listedAll {
+		known := make(map[int64]struct{}, len(jobs))
+		for _, job := range jobs {
+			known[job.WorkflowJobID] = struct{}{}
+		}
+		for jobID := range r.staleJobChecks {
+			if _, ok := known[jobID]; !ok {
+				delete(r.staleJobChecks, jobID)
+			}
+		}
+	}
+
+	reconciled := map[int64]struct{}{}
+	checked := 0
+	passCtx, cancel := context.WithTimeout(r.ctx, 20*time.Second)
+	defer cancel()
+	for _, job := range jobs {
+		if checked >= maxStaleWorkflowJobChecks || now.Sub(job.CreatedAt) < staleWorkflowJobAge {
+			continue
+		}
+		if nextCheck, ok := r.staleJobChecks[job.WorkflowJobID]; ok && now.Before(nextCheck) {
+			continue
+		}
+		if job.RepositoryOwner == "" || job.RepositoryName == "" {
+			continue
+		}
+
+		r.staleJobChecks[job.WorkflowJobID] = now.Add(staleWorkflowJobCheckBackoff)
+		checked++
+		remote, response, err := r.ghcli.GetWorkflowJobByID(
+			passCtx, job.RepositoryOwner, job.RepositoryName, job.WorkflowJobID,
+		)
+		notFound := response != nil && response.StatusCode == http.StatusNotFound
+		if err != nil && !notFound {
+			slog.With(slog.Any("error", err)).WarnContext(
+				r.ctx, "failed to reconcile stale workflow job; retaining local row",
+				"job_id", job.WorkflowJobID,
+			)
+			continue
+		}
+		if !notFound && (remote == nil || remote.GetStatus() != string(params.JobStatusCompleted)) {
+			continue
+		}
+		if err := r.store.DeleteJob(r.ctx, job.WorkflowJobID); err != nil && !errors.Is(err, runnerErrors.ErrNotFound) {
+			slog.With(slog.Any("error", err)).ErrorContext(r.ctx, "failed to delete reconciled workflow job", "job_id", job.WorkflowJobID)
+			continue
+		}
+		r.mux.Lock()
+		delete(r.jobs, job.ID)
+		r.mux.Unlock()
+		delete(r.staleJobChecks, job.WorkflowJobID)
+		reconciled[job.WorkflowJobID] = struct{}{}
+		slog.InfoContext(r.ctx, "removed stale workflow job after GitHub reconciliation", "job_id", job.WorkflowJobID, "not_found", notFound)
+	}
+	return reconciled
+}
+
 // consumeQueuedJobs will pull all the known jobs from the database and attempt to create a new
 // runner in one of the pools it manages, if it matches the requested labels.
 // This is a best effort attempt to consume queued jobs. We do not have any real way to know which
@@ -1772,6 +1833,7 @@ func (r *basePoolManager) DeleteRunner(runner params.Instance, forceRemove, bypa
 // so those will trigger the creation of a runner. The jobs we don't know about will be dealt with by the idle runners.
 // Once jobs are consumed, you can set min-idle-runners to 0 again.
 func (r *basePoolManager) consumeQueuedJobs() error {
+	reconciled := r.reconcileStaleWorkflowJobs()
 	queued := r.getQueuedJobs()
 
 	poolsCache := poolsForTags{
@@ -1782,6 +1844,9 @@ func (r *basePoolManager) consumeQueuedJobs() error {
 		r.ctx, "found queued jobs",
 		"job_count", len(queued))
 	for _, job := range queued {
+		if _, removed := reconciled[job.WorkflowJobID]; removed {
+			continue
+		}
 		if job.LockedBy != uuid.Nil && job.LockedBy.String() != r.ID() {
 			// Job was handled by us or another entity.
 			slog.DebugContext(
@@ -1799,18 +1864,11 @@ func (r *basePoolManager) consumeQueuedJobs() error {
 			continue
 		}
 
-		if time.Since(job.UpdatedAt) >= time.Minute*10 {
-			// Job is still queued in our db, 10 minutes after a matching runner
-			// was spawned. Unlock it and try again. A different job may have picked up
-			// the runner.
-			if err := r.store.UnlockJob(r.ctx, job.WorkflowJobID, r.ID()); err != nil {
-				// nolint:golangci-lint,godox
-				// TODO: Implament a cache? Should we return here?
-				slog.With(slog.Any("error", err)).ErrorContext(
-					r.ctx, "failed to unlock job",
-					"job_id", job.WorkflowJobID)
-				continue
-			}
+		if err := r.unlockExpiredJob(&job); err != nil {
+			slog.With(slog.Any("error", err)).ErrorContext(
+				r.ctx, "failed to unlock job",
+				"job_id", job.WorkflowJobID)
+			continue
 		}
 
 		if job.LockedBy.String() == r.ID() {
@@ -1895,6 +1953,21 @@ func (r *basePoolManager) consumeQueuedJobs() error {
 		slog.With(slog.Any("error", err)).ErrorContext(
 			r.ctx, "failed to delete completed jobs")
 	}
+	return nil
+}
+
+// unlockExpiredJob releases a scheduler lock after its retry window and also
+// updates the copy consumed in this pass. The database watcher can lag behind
+// UnlockJob; without clearing the local copy, the queue consumer immediately
+// sees the old owner and skips the job again.
+func (r *basePoolManager) unlockExpiredJob(job *params.Job) error {
+	if time.Since(job.UpdatedAt) < 10*time.Minute {
+		return nil
+	}
+	if err := r.store.UnlockJob(r.ctx, job.WorkflowJobID, r.ID()); err != nil {
+		return err
+	}
+	job.LockedBy = uuid.Nil
 	return nil
 }
 

@@ -1297,7 +1297,10 @@ func (r *basePoolManager) retryFailedInstancesForOnePool(ctx context.Context, po
 }
 
 func (r *basePoolManager) retryFailedInstances() error {
-	pools := cache.GetEntityPools(r.entity.ID)
+	pools, err := r.currentEntityPools()
+	if err != nil {
+		return fmt.Errorf("refreshing pools before retrying failed instances: %w", err)
+	}
 	g, ctx := errgroup.WithContext(r.ctx)
 	for _, pool := range pools {
 		pool := pool
@@ -1317,7 +1320,10 @@ func (r *basePoolManager) retryFailedInstances() error {
 }
 
 func (r *basePoolManager) scaleDown() error {
-	pools := cache.GetEntityPools(r.entity.ID)
+	pools, err := r.currentEntityPools()
+	if err != nil {
+		return fmt.Errorf("refreshing pools before scale down: %w", err)
+	}
 	g, ctx := errgroup.WithContext(r.ctx)
 	for _, pool := range pools {
 		pool := pool
@@ -1335,7 +1341,10 @@ func (r *basePoolManager) scaleDown() error {
 }
 
 func (r *basePoolManager) ensureMinIdleRunners() error {
-	pools := cache.GetEntityPools(r.entity.ID)
+	pools, err := r.currentEntityPools()
+	if err != nil {
+		return fmt.Errorf("refreshing pools before ensuring minimum idle runners: %w", err)
+	}
 	g, _ := errgroup.WithContext(r.ctx)
 	for _, pool := range pools {
 		pool := pool
@@ -1348,6 +1357,19 @@ func (r *basePoolManager) ensureMinIdleRunners() error {
 		return fmt.Errorf("failed to ensure minimum idle workers: %w", err)
 	}
 	return nil
+}
+
+// currentEntityPools reloads the authoritative pool limits before a periodic
+// scheduling pass. Pool updates normally arrive through GARM's in-process
+// database watcher, but external controllers may update the shared database
+// directly and therefore cannot publish an in-process watcher event.
+func (r *basePoolManager) currentEntityPools() ([]params.Pool, error) {
+	pools, err := r.store.ListEntityPools(r.ctx, r.entity)
+	if err != nil {
+		return nil, fmt.Errorf("listing entity pools: %w", err)
+	}
+	cache.ReplaceEntityPools(r.entity.ID, pools)
+	return pools, nil
 }
 
 func (r *basePoolManager) deleteInstanceFromProvider(ctx context.Context, instance params.Instance) error {
@@ -1918,6 +1940,13 @@ func (r *basePoolManager) consumeQueuedJobs() error {
 					r.ctx, "could not find a pool to create a runner for job",
 					"job_id", job.WorkflowJobID)
 				break
+			}
+			if !pool.Enabled || pool.MaxRunners == 0 {
+				slog.DebugContext(
+					r.ctx, "pool currently has no runner capacity",
+					"pool_id", pool.ID,
+					"job_id", job.WorkflowJobID)
+				continue
 			}
 
 			slog.InfoContext(

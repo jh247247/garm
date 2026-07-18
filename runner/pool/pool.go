@@ -51,6 +51,7 @@ import (
 var (
 	poolIDLabelprefix     = "runner-pool-id"
 	controllerLabelPrefix = "runner-controller-id"
+	errPoolAtCapacity     = errors.New("pool is at runner capacity")
 	// We tag runners that have been spawned as a result of a queued job with the job ID
 	// that spawned them. There is no way to guarantee that the runner spawned in response to a particular
 	// job, will be picked up by that job. We mark them so as in the very likely event that the runner
@@ -1147,6 +1148,17 @@ func (r *basePoolManager) addRunnerToPool(pool params.Pool, aditionalLabels []st
 		return fmt.Errorf("pool %s is disabled", pool.ID)
 	}
 
+	// Avoid requesting a GitHub JIT configuration when the pool is already
+	// full. CreateInstance retains its transactional max-runners check as the
+	// authoritative race guard if another consumer allocates after this read.
+	existingInstances, err := r.store.ListPoolInstances(r.ctx, pool.ID)
+	if err != nil {
+		return fmt.Errorf("checking current capacity for pool %s: %w", pool.ID, err)
+	}
+	if uint(len(existingInstances)) >= pool.MaxRunners {
+		return fmt.Errorf("%w: %s", errPoolAtCapacity, pool.ID)
+	}
+
 	if err := r.AddRunner(r.ctx, pool.ID, aditionalLabels); err != nil {
 		return fmt.Errorf("failed to add new instance for pool %s: %w", pool.ID, err)
 	}
@@ -1923,6 +1935,8 @@ func (r *basePoolManager) consumeQueuedJobs() error {
 		}
 
 		runnerCreated := false
+		poolUnavailable := false
+		hadCreateError := false
 		if err := r.store.LockJob(r.ctx, job.WorkflowJobID, r.ID()); err != nil {
 			slog.With(slog.Any("error", err)).ErrorContext(
 				r.ctx, "could not lock job",
@@ -1942,6 +1956,7 @@ func (r *basePoolManager) consumeQueuedJobs() error {
 				break
 			}
 			if !pool.Enabled || pool.MaxRunners == 0 {
+				poolUnavailable = true
 				slog.DebugContext(
 					r.ctx, "pool currently has no runner capacity",
 					"pool_id", pool.ID,
@@ -1949,16 +1964,25 @@ func (r *basePoolManager) consumeQueuedJobs() error {
 				continue
 			}
 
-			slog.InfoContext(
-				r.ctx, "attempting to create a runner in pool",
-				"pool_id", pool.ID,
-				"job_id", job.WorkflowJobID)
 			if err := r.addRunnerToPool(pool, jobLabels); err != nil {
+				if errors.Is(err, errPoolAtCapacity) {
+					poolUnavailable = true
+					slog.DebugContext(
+						r.ctx, "pool already has its maximum runners",
+						"pool_id", pool.ID,
+						"job_id", job.WorkflowJobID)
+					continue
+				}
+				hadCreateError = true
 				slog.With(slog.Any("error", err)).ErrorContext(
 					r.ctx, "could not add runner to pool",
 					"pool_id", pool.ID)
 				continue
 			}
+			slog.InfoContext(
+				r.ctx, "created a runner in response to queued job",
+				"pool_id", pool.ID,
+				"job_id", job.WorkflowJobID)
 			slog.DebugContext(r.ctx, "a new runner was added as a response to queued job",
 				"pool_id", pool.ID,
 				"job_id", job.WorkflowJobID)
@@ -1967,9 +1991,15 @@ func (r *basePoolManager) consumeQueuedJobs() error {
 		}
 
 		if !runnerCreated {
-			slog.WarnContext(
-				r.ctx, "could not create a runner for job; unlocking",
-				"job_id", job.WorkflowJobID)
+			if hadCreateError || !poolUnavailable {
+				slog.WarnContext(
+					r.ctx, "could not create a runner for job; unlocking",
+					"job_id", job.WorkflowJobID)
+			} else {
+				slog.DebugContext(
+					r.ctx, "no matching pool currently has runner capacity; unlocking job",
+					"job_id", job.WorkflowJobID)
+			}
 			if err := r.store.UnlockJob(r.ctx, job.WorkflowJobID, r.ID()); err != nil {
 				slog.With(slog.Any("error", err)).ErrorContext(
 					r.ctx, "failed to unlock job",

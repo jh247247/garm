@@ -1096,7 +1096,8 @@ func (r *basePoolManager) scaleDownOnePool(ctx context.Context, pool params.Pool
 		return nil
 	}
 
-	surplus := float64(len(idleWorkers) - (pool.MinIdleRunnersAsInt() + len(r.getQueuedJobs())))
+	matchingQueuedJobs := queuedJobsMatchingPool(r.getQueuedJobs(), pool)
+	surplus := float64(len(idleWorkers) - (pool.MinIdleRunnersAsInt() + matchingQueuedJobs))
 
 	if surplus <= 0 {
 		return nil

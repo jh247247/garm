@@ -110,6 +110,31 @@ func (r *basePoolManager) getQueuedJobs() []params.Job {
 	return ret
 }
 
+func queuedJobsMatchingPool(jobs []params.Job, pool params.Pool) int {
+	poolTags := make(map[string]struct{}, len(pool.Tags))
+	for _, tag := range pool.Tags {
+		poolTags[strings.ToLower(tag.Name)] = struct{}{}
+	}
+
+	matching := 0
+	for _, job := range jobs {
+		if params.JobStatus(job.Status) != params.JobStatusQueued || len(job.Labels) == 0 {
+			continue
+		}
+		matches := true
+		for _, label := range job.Labels {
+			if _, ok := poolTags[strings.ToLower(label)]; !ok {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			matching++
+		}
+	}
+	return matching
+}
+
 func (r *basePoolManager) waitForToolsOrCancel() (hasTools, stopped bool) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()

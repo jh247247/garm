@@ -240,3 +240,23 @@ func TestPoolsForTagsBalancerTypePack(t *testing.T) {
 		t.Fatalf("expected 0, got %d", poolCache.next)
 	}
 }
+
+func TestQueuedJobsMatchingPoolCountsOnlyCompatibleQueuedJobs(t *testing.T) {
+	pool := params.Pool{Tags: []params.Tag{
+		{Name: "self-hosted"},
+		{Name: "Linux"},
+		{Name: "X64"},
+		{Name: "large"},
+	}}
+	jobs := []params.Job{
+		{Status: string(params.JobStatusQueued), Labels: []string{"self-hosted", "large"}},
+		{Status: string(params.JobStatusQueued), Labels: []string{"self-hosted", "medium"}},
+		{Status: string(params.JobStatusInProgress), Labels: []string{"self-hosted", "large"}},
+		{Status: string(params.JobStatusQueued)},
+		{Status: string(params.JobStatusQueued), Labels: []string{"SELF-HOSTED", "LARGE"}},
+	}
+
+	if got := queuedJobsMatchingPool(jobs, pool); got != 2 {
+		t.Fatalf("expected 2 matching queued jobs, got %d", got)
+	}
+}

@@ -881,11 +881,13 @@ type ControllerInfo struct {
 }
 
 func (c *ControllerInfo) JobBackoff() time.Duration {
-	if math.MaxInt64 > c.MinimumJobAgeBackoff {
+	seconds := uint64(c.MinimumJobAgeBackoff)
+	maxSeconds := uint64(math.MaxInt64 / int64(time.Second))
+	if seconds > maxSeconds {
 		return time.Duration(math.MaxInt64)
 	}
 
-	return time.Duration(int64(c.MinimumJobAgeBackoff))
+	return time.Duration(seconds) * time.Second
 }
 
 // swagger:model GithubRateLimit

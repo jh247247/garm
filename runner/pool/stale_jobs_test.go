@@ -39,7 +39,7 @@ func TestReconcileStaleWorkflowJobsDeletesCompletedJob(t *testing.T) {
 	}
 	manager, store, gh := staleTestManager(t, job)
 	gh.On("GetWorkflowJobByID", mock.Anything, "itembase-app", "itembase", int64(42)).
-		Return(&github.WorkflowJob{Status: github.String("completed")}, &github.Response{Response: &http.Response{StatusCode: http.StatusOK}}, nil).Once()
+		Return(&github.WorkflowJob{Status: github.Ptr("completed")}, &github.Response{Response: &http.Response{StatusCode: http.StatusOK}}, nil).Once()
 	store.On("DeleteJob", mock.Anything, int64(42)).Return(nil).Once()
 
 	removed := manager.reconcileStaleWorkflowJobs()
@@ -75,7 +75,7 @@ func TestReconcileStaleWorkflowJobsRetainsRemotelyQueuedJob(t *testing.T) {
 	}
 	manager, _, gh := staleTestManager(t, job)
 	gh.On("GetWorkflowJobByID", mock.Anything, "itembase-app", "itembase", int64(45)).
-		Return(&github.WorkflowJob{Status: github.String("queued")}, &github.Response{Response: &http.Response{StatusCode: http.StatusOK}}, nil).Once()
+		Return(&github.WorkflowJob{Status: github.Ptr("queued")}, &github.Response{Response: &http.Response{StatusCode: http.StatusOK}}, nil).Once()
 
 	removed := manager.reconcileStaleWorkflowJobs()
 	if len(removed) != 0 {

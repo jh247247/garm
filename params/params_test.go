@@ -16,7 +16,28 @@ package params
 
 import (
 	"testing"
+	"time"
 )
+
+func TestControllerInfoJobBackoff(t *testing.T) {
+	tests := []struct {
+		name     string
+		seconds  uint
+		expected time.Duration
+	}{
+		{name: "disabled", seconds: 0, expected: 0},
+		{name: "configured seconds", seconds: 30, expected: 30 * time.Second},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			controller := ControllerInfo{MinimumJobAgeBackoff: test.seconds}
+			if got := controller.JobBackoff(); got != test.expected {
+				t.Fatalf("expected %s, got %s", test.expected, got)
+			}
+		})
+	}
+}
 
 func TestPool_HasRequiredLabels(t *testing.T) {
 	tests := []struct {

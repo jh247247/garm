@@ -1857,7 +1857,7 @@ func (r *basePoolManager) reconcileStaleWorkflowJobs() map[int64]struct{} {
 // Once jobs are consumed, you can set min-idle-runners to 0 again.
 func (r *basePoolManager) consumeQueuedJobs() error {
 	reconciled := r.reconcileStaleWorkflowJobs()
-	queued := r.getQueuedJobs()
+	queued := r.queuedJobsForScheduling()
 
 	poolsCache := poolsForTags{
 		poolCacheType: r.entity.GetPoolBalancerType(),
@@ -1879,7 +1879,7 @@ func (r *basePoolManager) consumeQueuedJobs() error {
 			continue
 		}
 
-		if time.Since(job.UpdatedAt) < time.Second*r.controllerInfo.JobBackoff() {
+		if time.Since(job.UpdatedAt) < r.controllerInfo.JobBackoff() {
 			// give the idle runners a chance to pick up the job.
 			slog.DebugContext(
 				r.ctx, "job backoff not reached", "backoff_interval", r.controllerInfo.MinimumJobAgeBackoff,
@@ -1984,6 +1984,28 @@ func (r *basePoolManager) consumeQueuedJobs() error {
 			r.ctx, "failed to delete completed jobs")
 	}
 	return nil
+}
+
+// queuedJobsForScheduling reloads the authoritative queued rows before each
+// scheduling pass. The watcher cache remains the low-latency path for webhook
+// updates, but a missed in-process watcher event must not strand a durable DB
+// row indefinitely. If the database cannot be read, retain the existing cache
+// as a non-destructive availability fallback.
+func (r *basePoolManager) queuedJobsForScheduling() []params.Job {
+	queued, err := r.store.ListEntityJobsByStatus(
+		r.ctx, r.entity.EntityType, r.entity.ID, params.JobStatusQueued,
+	)
+	if err != nil {
+		slog.With(slog.Any("error", err)).WarnContext(
+			r.ctx, "failed to refresh queued jobs from database; using watcher cache",
+		)
+		return r.getQueuedJobs()
+	}
+
+	sort.Slice(queued, func(i, j int) bool {
+		return queued[i].CreatedAt.Before(queued[j].CreatedAt)
+	})
+	return queued
 }
 
 // unlockExpiredJob releases a scheduler lock after its retry window and also

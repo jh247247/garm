@@ -215,6 +215,22 @@ func (s *InstancesTestSuite) TestCreateInstance() {
 	s.Require().Equal(storeInstance.CallbackURL, instance.CallbackURL)
 }
 
+func (s *InstancesTestSuite) TestCreateInstanceJitConfigurationRoundTrip() {
+	createParams := s.Fixtures.CreateInstanceParams
+	createParams.Name = "test-jit-instance"
+	createParams.JitConfiguration = map[string]string{
+		"encoded_jit_config": "test-jit-config",
+	}
+
+	created, err := s.Store.CreateInstance(s.adminCtx, s.Fixtures.Pool.ID, createParams)
+	s.Require().NoError(err)
+
+	reread, err := s.Store.GetInstance(s.adminCtx, createParams.Name)
+	s.Require().NoError(err)
+	s.Require().Equal(createParams.JitConfiguration, created.JitConfiguration)
+	s.Require().Equal(createParams.JitConfiguration, reread.JitConfiguration)
+}
+
 func (s *InstancesTestSuite) TestCreateInstanceInvalidPoolID() {
 	_, err := s.Store.CreateInstance(s.adminCtx, "dummy-pool-id", params.CreateInstanceParams{})
 

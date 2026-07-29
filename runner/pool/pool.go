@@ -260,9 +260,25 @@ func (r *basePoolManager) HandleWorkflowJob(job params.WorkflowJob) error {
 			return nil
 		}
 
-		// Runner is non-ephemeral: mark it idle so it can pick up another job.
-		// The scale-down routine will reap it after the 5-minute grace period
-		// if no new work arrives.
+		// A runner configured through GitHub's JIT endpoint is ephemeral. GitHub
+		// removes its registration after the first job, so retaining the provider
+		// instance as idle strands matching queued work behind unusable capacity.
+		if len(fromCache.JitConfiguration) > 0 {
+			if err := r.DeleteRunner(fromCache, false, false); err != nil {
+				slog.With(slog.Any("error", err)).ErrorContext(
+					r.ctx, "failed to retire completed JIT runner",
+					"runner_name", util.SanitizeLogEntry(jobParams.RunnerName))
+				return fmt.Errorf("error retiring completed JIT runner: %w", err)
+			}
+			slog.DebugContext(
+				r.ctx, "job completed, JIT runner marked for deletion",
+				"runner_name", util.SanitizeLogEntry(jobParams.RunnerName))
+			break
+		}
+
+		// Non-JIT runners are reusable. Mark the runner idle so it can pick up
+		// another job. The scale-down routine will reap it after the 5-minute
+		// grace period if no new work arrives.
 		if _, err := r.setInstanceRunnerStatus(jobParams.RunnerName, params.RunnerIdle); err != nil {
 			if errors.Is(err, runnerErrors.ErrNotFound) {
 				return nil
@@ -342,7 +358,7 @@ func (r *basePoolManager) startLoopForFunction(f func() error, interval time.Dur
 	}()
 
 	for {
-		shouldRun := r.managerIsRunning
+		shouldRun := r.Status().IsRunning
 		if alwaysRun {
 			shouldRun = true
 		}
@@ -805,6 +821,49 @@ func (r *basePoolManager) AddRunner(ctx context.Context, poolID string, aditiona
 		}
 	}
 
+	// Generating a JIT config registers the runner in GitHub immediately. Install
+	// cleanup before reserving the database row because capacity validation can
+	// reject CreateInstance (for example, when max_runners has been reached).
+	// Without this guard, every scheduler retry leaks another offline
+	// registration that has no matching GARM instance.
+	var instance params.Instance
+	defer func() {
+		if err == nil {
+			return
+		}
+
+		var cleanupErr error
+		if instance.ID != "" {
+			cleanupErr = r.DeleteRunner(instance, false, false)
+			if cleanupErr == nil {
+				return
+			}
+			slog.With(slog.Any("error", cleanupErr)).ErrorContext(
+				ctx, "failed to cleanup instance after runner allocation error",
+				"runner_name", util.SanitizeLogEntry(instance.Name))
+		}
+
+		if runner != nil {
+			registrationCleanupErr := r.ghcli.RemoveEntityRunner(r.ctx, runner.GetID())
+			if errors.Is(registrationCleanupErr, runnerErrors.ErrNotFound) {
+				registrationCleanupErr = nil
+			}
+			if registrationCleanupErr != nil {
+				cleanupErr = errors.Join(cleanupErr, registrationCleanupErr)
+				slog.With(slog.Any("error", registrationCleanupErr)).ErrorContext(
+					ctx, "failed to remove JIT registration after runner allocation error",
+					"runner_name", util.SanitizeLogEntry(name),
+					"gh_runner_id", runner.GetID())
+			}
+		}
+
+		if cleanupErr != nil {
+			cleanupFailure := fmt.Errorf("failed to clean up runner after allocation error: %w", cleanupErr)
+			r.SetPoolRunningState(false, cleanupFailure.Error())
+			err = errors.Join(err, cleanupFailure)
+		}
+	}()
+
 	createParams := params.CreateInstanceParams{
 		Name:              name,
 		Status:            commonParams.InstancePendingCreate,
@@ -823,31 +882,10 @@ func (r *basePoolManager) AddRunner(ctx context.Context, poolID string, aditiona
 		createParams.AgentID = runner.GetID()
 	}
 
-	instance, err := r.store.CreateInstance(r.ctx, poolID, createParams)
+	instance, err = r.store.CreateInstance(r.ctx, poolID, createParams)
 	if err != nil {
 		return fmt.Errorf("error creating instance: %w", err)
 	}
-
-	defer func() {
-		if err != nil {
-			if instance.ID != "" {
-				if err := r.DeleteRunner(instance, false, false); err != nil {
-					slog.With(slog.Any("error", err)).ErrorContext(
-						ctx, "failed to cleanup instance",
-						"runner_name", instance.Name)
-				}
-			}
-
-			if runner != nil {
-				runnerCleanupErr := r.ghcli.RemoveEntityRunner(r.ctx, runner.GetID())
-				if err != nil {
-					slog.With(slog.Any("error", runnerCleanupErr)).ErrorContext(
-						ctx, "failed to remove runner",
-						"gh_runner_id", runner.GetID())
-				}
-			}
-		}
-	}()
 
 	return nil
 }
@@ -1712,13 +1750,22 @@ func (r *basePoolManager) ID() string {
 // Delete runner will delete a runner from a pool. If forceRemove is set to true, any error received from
 // the IaaS provider will be ignored and deletion will continue.
 func (r *basePoolManager) DeleteRunner(runner params.Instance, forceRemove, bypassGHUnauthorizedError bool) error {
-	if !r.managerIsRunning && !bypassGHUnauthorizedError {
+	if !r.Status().IsRunning && !bypassGHUnauthorizedError {
 		return runnerErrors.NewConflictError("pool manager is not running for %s", r.entity.String())
 	}
 
 	if runner.AgentID != 0 {
 		if err := r.ghcli.RemoveEntityRunner(r.ctx, runner.AgentID); err != nil {
-			if errors.Is(err, runnerErrors.ErrUnauthorized) {
+			switch {
+			case errors.Is(err, runnerErrors.ErrNotFound):
+				// JIT runners are removed automatically by GitHub after their first
+				// job. An authenticated not-found response proves the registration is
+				// already absent, so provider teardown can continue safely.
+				slog.DebugContext(
+					r.ctx, "runner registration already absent from github",
+					"runner_name", util.SanitizeLogEntry(runner.Name),
+					"runner_id", runner.AgentID)
+			case errors.Is(err, runnerErrors.ErrUnauthorized):
 				slog.With(slog.Any("error", err)).ErrorContext(r.ctx, "failed to remove runner from github")
 				// Mark the pool as offline from this point forward
 				r.SetPoolRunningState(false, fmt.Sprintf("failed to remove runner: %q", err))
@@ -1729,7 +1776,7 @@ func (r *basePoolManager) DeleteRunner(runner params.Instance, forceRemove, bypa
 				} else {
 					return fmt.Errorf("error removing runner: %w", err)
 				}
-			} else {
+			default:
 				return fmt.Errorf("error removing runner: %w", err)
 			}
 		}

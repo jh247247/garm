@@ -19,12 +19,47 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 
 	"github.com/gorilla/mux"
 
 	"github.com/cloudbase/garm/apiserver/params"
+	"github.com/cloudbase/garm/cache"
 )
+
+func (a *APIController) RunnerArtifactHandler(w http.ResponseWriter, r *http.Request) {
+	metadata, err := a.r.GetInstanceMetadata(r.Context())
+	if err != nil {
+		handleError(r.Context(), w, err)
+		return
+	}
+	if r.URL.Query().Get("filename") != metadata.RunnerTools.GetFilename() {
+		http.Error(w, "runner package changed; recreate runner with refreshed metadata", http.StatusConflict)
+		return
+	}
+	filename, digest, err := cache.RunnerArtifact(r.Context(), metadata.RunnerTools)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "runner artifact unavailable", "error", err)
+		http.Error(w, "verified runner artifact unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	file, err := os.Open(filename)
+	if err != nil {
+		handleError(r.Context(), w, err)
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		handleError(r.Context(), w, err)
+		return
+	}
+	w.Header().Set("X-Runner-SHA256", digest)
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("Cache-Control", "private, no-store")
+	http.ServeContent(w, r, metadata.RunnerTools.GetFilename(), info.ModTime(), file)
+}
 
 func (a *APIController) InstanceMetadataHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()

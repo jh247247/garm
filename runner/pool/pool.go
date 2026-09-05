@@ -986,12 +986,14 @@ func (r *basePoolManager) addInstanceToProvider(instance params.Instance) error 
 
 	defer func() {
 		if instanceIDToDelete != "" {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(r.ctx), 2*time.Minute)
+			defer cancel()
 			deleteInstanceParams := common.DeleteInstanceParams{
 				DeleteInstanceV011: common.DeleteInstanceV011Params{
 					ProviderBaseParams: r.getProviderBaseParams(pool),
 				},
 			}
-			if err := provider.DeleteInstance(r.ctx, instanceIDToDelete, deleteInstanceParams); err != nil {
+			if err := provider.DeleteInstance(cleanupCtx, instanceIDToDelete, deleteInstanceParams); err != nil {
 				if !errors.Is(err, runnerErrors.ErrNotFound) {
 					slog.With(slog.Any("error", err)).ErrorContext(
 						r.ctx, "failed to cleanup instance",
@@ -1012,16 +1014,17 @@ func (r *basePoolManager) addInstanceToProvider(instance params.Instance) error 
 		return fmt.Errorf("error creating instance: %w", err)
 	}
 
-	if providerInstance.Status == commonParams.InstanceError {
-		instanceIDToDelete = instance.ProviderID
-		if instanceIDToDelete == "" {
-			instanceIDToDelete = instance.Name
-		}
+	instanceIDToDelete = providerInstance.ProviderID
+	if instanceIDToDelete == "" {
+		instanceIDToDelete = instance.Name
 	}
 
 	updateInstanceArgs := r.updateArgsFromProviderInstance(providerInstance)
 	if _, err := r.store.UpdateInstance(r.ctx, instance.Name, updateInstanceArgs); err != nil {
 		return fmt.Errorf("error updating instance: %w", err)
+	}
+	if providerInstance.Status != commonParams.InstanceError {
+		instanceIDToDelete = ""
 	}
 	return nil
 }
@@ -2001,6 +2004,10 @@ func (r *basePoolManager) consumeQueuedJobs() error {
 				"pool_id", pool.ID,
 				"job_id", job.WorkflowJobID)
 			if err := r.addRunnerToPool(pool, jobLabels); err != nil {
+				if errors.Is(err, &runnerErrors.ConflictError{}) {
+					slog.DebugContext(r.ctx, "pool admission changed while reserving runner", "pool_id", pool.ID)
+					continue
+				}
 				slog.With(slog.Any("error", err)).ErrorContext(
 					r.ctx, "could not add runner to pool",
 					"pool_id", pool.ID)
@@ -2014,7 +2021,7 @@ func (r *basePoolManager) consumeQueuedJobs() error {
 		}
 
 		if !runnerCreated {
-			slog.WarnContext(
+			slog.DebugContext(
 				r.ctx, "could not create a runner for job; unlocking",
 				"job_id", job.WorkflowJobID)
 			if err := r.store.UnlockJob(r.ctx, job.WorkflowJobID, r.ID()); err != nil {

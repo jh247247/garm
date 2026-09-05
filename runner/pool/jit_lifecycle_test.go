@@ -87,16 +87,18 @@ func TestCompletedJITRunnerIsMarkedForDeletionWhenGithubAlreadyRemovedIt(t *test
 	}
 }
 
-func TestCompletedNonJITRunnerReturnsToIdle(t *testing.T) {
-	instance := params.Instance{Name: "completed-reusable-runner", AgentID: 43}
-	manager, store, _, event := completedRunnerTestSetup(t, instance)
+func TestCompletedNonJITRunnerIsMarkedForDeletion(t *testing.T) {
+	instance := params.Instance{Name: "completed-token-runner", AgentID: 43}
+	manager, store, gh, event := completedRunnerTestSetup(t, instance)
 
+	gh.On("RemoveEntityRunner", mock.Anything, instance.AgentID).
+		Return(runnerErrors.ErrNotFound).Once()
 	store.On("UpdateInstance", mock.Anything, instance.Name, mock.MatchedBy(func(update params.UpdateInstanceParams) bool {
-		return update.RunnerStatus == params.RunnerIdle && update.Status == ""
+		return update.Status == commonParams.InstancePendingDelete
 	})).Return(instance, nil).Once()
 
 	if err := manager.HandleWorkflowJob(event); err != nil {
-		t.Fatalf("completed non-JIT runner should return to idle: %v", err)
+		t.Fatalf("completed token runner should be retired, not counted as idle capacity: %v", err)
 	}
 }
 

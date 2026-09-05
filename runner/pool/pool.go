@@ -260,36 +260,14 @@ func (r *basePoolManager) HandleWorkflowJob(job params.WorkflowJob) error {
 			return nil
 		}
 
-		// A runner configured through GitHub's JIT endpoint is ephemeral. GitHub
-		// removes its registration after the first job, so retaining the provider
-		// instance as idle strands matching queued work behind unusable capacity.
-		if len(fromCache.JitConfiguration) > 0 {
-			if err := r.DeleteRunner(fromCache, false, false); err != nil {
-				slog.With(slog.Any("error", err)).ErrorContext(
-					r.ctx, "failed to retire completed JIT runner",
-					"runner_name", util.SanitizeLogEntry(jobParams.RunnerName))
-				return fmt.Errorf("error retiring completed JIT runner: %w", err)
-			}
-			slog.DebugContext(
-				r.ctx, "job completed, JIT runner marked for deletion",
-				"runner_name", util.SanitizeLogEntry(jobParams.RunnerName))
-			break
-		}
-
-		// Non-JIT runners are reusable. Mark the runner idle so it can pick up
-		// another job. The scale-down routine will reap it after the 5-minute
-		// grace period if no new work arrives.
-		if _, err := r.setInstanceRunnerStatus(jobParams.RunnerName, params.RunnerIdle); err != nil {
-			if errors.Is(err, runnerErrors.ErrNotFound) {
-				return nil
-			}
+		if err := r.DeleteRunner(fromCache, false, false); err != nil {
 			slog.With(slog.Any("error", err)).ErrorContext(
-				r.ctx, "failed to update runner status",
+				r.ctx, "failed to retire completed runner",
 				"runner_name", util.SanitizeLogEntry(jobParams.RunnerName))
-			return fmt.Errorf("error updating runner: %w", err)
+			return fmt.Errorf("error retiring completed runner: %w", err)
 		}
 		slog.DebugContext(
-			r.ctx, "job completed, runner set back to idle for reuse",
+			r.ctx, "job completed, runner marked for deletion",
 			"runner_name", util.SanitizeLogEntry(jobParams.RunnerName))
 	case "in_progress":
 		fromCache, ok := cache.GetInstanceCache(jobParams.RunnerName)

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"os"
 	"sync"
 	"time"
 
@@ -118,6 +119,15 @@ func (t *toolsUpdater) updateTools() error {
 	tools, err := garmUtil.FetchTools(t.ctx, ghCli)
 	if err != nil {
 		return fmt.Errorf("fetching tools: %w", err)
+	}
+	if os.Getenv("GARM_RUNNER_CACHE_DIR") != "" {
+		for _, tool := range tools {
+			if tool.GetOS() == "linux" && tool.GetArchitecture() == "x64" {
+				if _, _, err := cache.RunnerArtifact(t.ctx, tool); err != nil {
+					return fmt.Errorf("preparing verified runner artifact: %w", err)
+				}
+			}
+		}
 	}
 	t.lastUpdate = time.Now().UTC()
 	t.tools = tools

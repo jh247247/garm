@@ -157,6 +157,7 @@ func NewAPIRouter(han *controllers.APIController, authMiddleware, initMiddleware
 	// Metadata URLs //
 	///////////////////
 	metadataRouter := apiSubRouter.PathPrefix("/metadata").Subrouter()
+	metadataRouter.Handle("/runner-artifact/", http.HandlerFunc(han.RunnerArtifactHandler)).Methods("GET")
 	metadataRouter.Use(instanceMiddleware.Middleware)
 
 	// Instance metadata

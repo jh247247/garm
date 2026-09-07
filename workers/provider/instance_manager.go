@@ -204,12 +204,14 @@ func (i *instanceManager) handleCreateInstanceInProvider(instance params.Instanc
 
 	defer func() {
 		if instanceIDToDelete != "" {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(i.ctx), 2*time.Minute)
+			defer cancel()
 			deleteInstanceParams := common.DeleteInstanceParams{
 				DeleteInstanceV011: common.DeleteInstanceV011Params{
 					ProviderBaseParams: baseParams,
 				},
 			}
-			if err := i.provider.DeleteInstance(i.ctx, instanceIDToDelete, deleteInstanceParams); err != nil {
+			if err := i.provider.DeleteInstance(cleanupCtx, instanceIDToDelete, deleteInstanceParams); err != nil {
 				if !errors.Is(err, runnerErrors.ErrNotFound) {
 					slog.With(slog.Any("error", err)).ErrorContext(
 						i.ctx, "failed to cleanup instance",
@@ -231,11 +233,9 @@ func (i *instanceManager) handleCreateInstanceInProvider(instance params.Instanc
 		return fmt.Errorf("creating instance in provider: %w", err)
 	}
 
-	if providerInstance.Status == commonParams.InstanceError {
-		instanceIDToDelete = instance.ProviderID
-		if instanceIDToDelete == "" {
-			instanceIDToDelete = instance.Name
-		}
+	instanceIDToDelete = providerInstance.ProviderID
+	if instanceIDToDelete == "" {
+		instanceIDToDelete = instance.Name
 	}
 
 	updated, err := i.helper.updateArgsFromProviderInstance(instance.Name, providerInstance)
@@ -243,6 +243,9 @@ func (i *instanceManager) handleCreateInstanceInProvider(instance params.Instanc
 		return fmt.Errorf("updating instance args: %w", err)
 	}
 	i.instance = updated
+	if providerInstance.Status != commonParams.InstanceError {
+		instanceIDToDelete = ""
+	}
 
 	return nil
 }
